@@ -2,6 +2,14 @@
 
 Generate `src/targets/<profile>/target.h` and `p0_fingerprint.h`.
 
+This automates the mechanical parts of the porting procedure in
+[`PORTING.md`](PORTING.md): symbol recovery, BTF struct/field offsets,
+trace event id, worker caller, nfulnl/random-table pointers, physical load
+addresses, and the P0 fingerprint are all derived from the boot.img instead
+of being recovered by hand. Treat the generated profile as
+correct-on-structure; the on-device exploit tuning (bank geometry, pselect
+timing, reclaim strategy) still has to be validated on hardware.
+
 Derives every firmware-dependent constant from a raw Android boot.img plus
 firmware load-address information. The physical load address comes from one
 of:
