@@ -33,6 +33,7 @@ import argparse
 import hashlib
 import os
 import re
+import gzip
 import struct
 import subprocess
 import sys
@@ -61,6 +62,8 @@ def unpack_kernel(boot: Path) -> bytes:
     if not (0x1000 < size and size + 0x1000 <= len(b)):
         raise SystemExit(f"{boot}: bad kernel_size 0x{size:x}")
     kernel = b[0x1000:0x1000 + size]
+    if kernel[:2] == b'\x1f\x8b':
+        kernel = gzip.decompress(kernel)
     if kernel[0x38:0x3C] != b'ARMd':
         raise SystemExit(f"{boot}: kernel is not an ARM64 Image")
     return kernel
