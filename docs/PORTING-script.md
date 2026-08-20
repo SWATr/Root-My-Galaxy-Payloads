@@ -64,6 +64,21 @@ generate_target.py \
 - `PAGE_SLAB_CACHE_OFF` is taken from `struct slab.slab_cache` in BTF
   (`0x08` on 6.6, `0x18` on 6.1), with `--slab-cache-off` as an override.
 
+## Pre-6.0 kernels (Android 12/13, 5.10/5.15)
+
+Detected from the kernel version string; no flags needed:
+
+- clang LTO local symbols (e.g. `configfs_read_iter.llvm.8090890824163915520`)
+  are resolved automatically via a unique `.llvm.` prefix match.
+- There is no `struct slab` in BTF; `PAGE_SLAB_CACHE_OFF` is recovered by
+  walking `struct page`'s anonymous unions (5.15: `0x18`).
+- `MM_STRUCT_SZ` is emitted as the kmalloc slab size of `mm_struct` (BTF size
+  rounded up to a power of two; 5.15 A54: `0x400`).
+- `KMALLOC_CGROUP_TYPE 1` / `KMALLOC_CACHE_TYPES 3` are emitted (5.15 has
+  normal + cgroup + DMA caches; 6.x defaults to type 2/4).
+- `p0_fingerprint.h` rows use a `0x4000` slide step (16K-aligned KASLR
+  slides; 125 rows up to `PROBE_OFFSET`) instead of the 6.x `0x10000` step.
+
 ## Optional tuning flags
 
 Kernel-derived values are automatic; the exploit tuning knobs that firmware
